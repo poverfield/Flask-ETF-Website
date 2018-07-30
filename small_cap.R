@@ -182,3 +182,5 @@ for(i in 1:length(S)){
 }
 signal = signal_func(BUY) # return only the signals to buy at next open
 plot_func(signal)
+
+print('Done')
