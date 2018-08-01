@@ -55,7 +55,7 @@ names(DATA) = S # name each df in list
 # Unify lenghts -> have all matrices start at most recent start date
 for(i in 1:x){
   if(start_date[i] != max(start_date)){
-    DATA[[i]] = DATA[[i]][-1,]
+    DATA[[i]] = DATA[[i]][which(DATA[[i]][,5] == max(start_date)):nrow(DATA[[i]]),]
   }
 }
 
