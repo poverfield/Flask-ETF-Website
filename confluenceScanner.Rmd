@@ -1,0 +1,399 @@
+---
+title: "Confluence Scanner"
+author: "Riley"
+date: "11/16/2019"
+output: html_document
+---
+
+Project Overview:
+
+for a specified stock in the S&P 500 this code determines if the stock should be bought or sold based on the confluence of the SAR, Bollinger Band and RSI technical indicators. There are also divergence buy signals for when the price and RSI values are diverging (these are less accurate than the confluence signals).
+
+Useful links on technical indicators used 
+- Billinger Bands: https://www.investopedia.com/articles/technical/102201.asp
+- Relative Strength Index (RSI): https://www.investopedia.com/terms/r/rsi.asp
+- Parabolic Sar: https://www.investopedia.com/trading/introduction-to-parabolic-sar/
+- Confluence trading: https://www.investopedia.com/terms/c/confluence.asp
+
+
+Additional links on other mainstream technical indicators
+- MACD (for trend or divergence indicators): https://www.investopedia.com/terms/m/macd.asp
+- Stochastic Oscillator (momentum): https://www.investopedia.com/terms/s/stochasticoscillator.asp
+
+
+
+
+Goal:
+- Identify a set of indicators, that when used together (confluence) generate inter-day buy/sell signals that outperforms the market.
+- Create a weight system so buy/sell signals can have higher/lower weights to help identify which signals are 'safer' trades (i.e greater divergence). Ideally this weight system can also identify which current ETFs owned should be traded to free up capital to buy a new 'safer' trade (i.e. the algorithm should be able to tell a user that a currently owned stock's momentum is slowing, or that they may be reaching a peak and they should sell that stock and buy a newly identified stock)
+
+
+
+```{r}
+if (!require(devtools)) install.packages('devtools')
+library(BatchGetSymbols)
+library(TTR)
+library(zoo)
+```
+
+
+Download Data from Quandl
+```{r}
+first.date = Sys.Date() - 500
+last.date = Sys.Date()
+
+#Get tickers fro S&P500  list
+SP500 = GetSP500Stocks()
+tickers = SP500[,1]
+
+# limit the number of tickers analyzed to random sample of 30
+tickers = append(sample(tickers)[1:10], c('AAPL', 'AMZN', 'TSLA', 'GOOG', 'MSFT', 'HD')) #get a sample list of tickers to test with
+
+#query data
+DATA_query = BatchGetSymbols(tickers = tickers,
+                             first.date = first.date,
+                             last.date = last.date,
+                             cache.folder = file.path(tempdir(),'BGS_Cache') )
+
+
+x = nrow(DATA_query[[1]]) # define number of stocks analyzing
+
+# get succesful ticker list from DATA_query[[1]] == 'keep'
+S = matrix(data = NA, ncol = 1, nrow = x)
+for(i in 1:x){
+  if(DATA_query[[1]][i,6] == 'KEEP'){
+    S[i] = toString(DATA_query[[1]][i,1])
+  }
+}
+S = S[which(!is.na(S))] # remove NAs
+x = length(S)
+start_date = matrix(data = NA, ncol = x, nrow = 1)
+
+DATA = list() #aggregate data into lists
+for(i in 1:x){
+  DATA[[i]] = DATA_query[[2]][which(DATA_query[[2]][,8] == S[i]),c(1:4,7)]
+  if(DATA[[i]][nrow(DATA[[i]])-1,5] == DATA[[i]][nrow(DATA[[i]]),5]){
+    DATA[[i]] = DATA[[i]][1:(nrow(DATA[[i]])-1),]
+    print('Duplicate last date')
+  }
+  if(any(is.na(DATA[[i]]))){  # NAs = mean of t +/- 1
+    na = which(is.na(DATA[[i]]), arr.ind = TRUE) # get NA locations (row, column)
+    for(j in 1:nrow(na)){
+      DATA[[i]][na[j,1], na[j,2]] = mean(c(DATA[[i]][na[j,1]-1, na[j,2]], DATA[[i]][na[j,1]+1, na[j,2]]))
+    }
+  }
+  start_date[i] = DATA[[i]][1,5]
+}
+names(DATA) = S # name each df in list
+# Unify lenghts -> have all matrices start at most recent start date
+for(i in 1:x){
+  if(start_date[i] != max(start_date)){
+    DATA[[i]] = DATA[[i]][-1,]
+  }
+}
+
+# Get list of successfule tickers to reference for testing
+tickers = names(DATA) 
+```
+
+
+Analyze data
+```{r}
+
+
+#specify an ETF to analyze
+j = 12
+n_etf = j
+
+# get data of single ETF
+df = DATA[[n_etf]]
+etf_name = tickers[n_etf]
+
+# SMA Cross
+long = 50
+short = 20
+sma_long = na.omit(SMA(df$price.close, long))
+sma_short = na.omit(SMA(df$price.close, short))
+  
+  
+# MACD
+macd = na.omit(MACD(df$price.close, nFast = 12, nSlow = 26, nSig = 9, percent = TRUE))
+
+
+#RSI Bands
+rsi = na.omit(RSI(df$price.close, n = 14))
+rsi_sd = rollapply(rsi, 20, sd, na.rm = TRUE) # caluclate standard deviation
+rsi_mean = rollapply(rsi, 20, mean, na.rm = TRUE) # calc mean for rsi
+rsi = rsi[(length(rsi) - length(rsi_sd) + 1):length(rsi)] # shorten rsi to match sd and mean length
+rsi_lower = rsi_mean - 1.8*rsi_sd # calc lower rsi band
+rsi_upper = rsi_mean + 1.8*rsi_sd # calc upper rsi band
+rsi = cbind(rsi, rsi_mean, rsi_upper, rsi_lower)
+  
+# Stochastic RSI
+stoch_rsi = na.omit(stoch(rsi[,1], nFastK = 14, nFastD = 3, sSlowD = 3, bounded = TRUE, smooth = 1))
+
+  
+# Donchian
+donchian = na.omit(DonchianChannel(df[, 2:3], n = 10, include.lag = FALSE))
+  
+#BBands
+bbands = na.omit(BBands(df[,2:4], n = 20))
+bbands_1sd= na.omit(BBands(df[,2:4], n = 20, sd = 1))
+  
+#ADX
+adx = na.omit(ADX(df[,2:4], n = 14))
+
+#SAR
+sar = SAR(df[,2:3])
+  
+# standardize length of data
+new_length = min(length(sma_long),
+                 length(sma_short),
+                 length(macd[,1]),
+                 length(rsi[,1]),
+                 length(stoch_rsi[,1]),
+                 length(donchian[,1]),
+                 length(bbands[,1]),
+                 length(bbands_1sd[,1]),
+                 length(adx[,1]),
+                 length(sar))
+
+df = df[(nrow(df) - new_length + 1):nrow(df),]
+sma_long = sma_long[(length(sma_long) - new_length + 1):length(sma_long)]
+sma_short = sma_short[(length(sma_short) - new_length + 1):length(sma_short)]
+macd = macd[(nrow(macd) - new_length + 1):nrow(macd),]
+rsi = rsi[(nrow(rsi) - new_length + 1):nrow(rsi),]
+stoch_rsi = stoch_rsi[(nrow(stoch_rsi) - new_length + 1):nrow(stoch_rsi),]
+donchian = donchian[(nrow(donchian) - new_length + 1):nrow(donchian),]
+bbands = bbands[(nrow(bbands) - new_length + 1):nrow(bbands),]
+bbands_1sd = bbands_1sd[(nrow(bbands_1sd) - new_length + 1):nrow(bbands_1sd),]
+adx = adx[(nrow(adx) - new_length + 1): nrow(adx),]
+sar = sar[(nrow(sar) - new_length + 1): nrow(sar)]
+
+rsi_volatility = rsi[,3] - rsi[,4] # doesn't need to be standardized because RSi is the same range for all ETFs
+#standardize bb volatility
+bb = bbands[,3] - bbands[,1]
+bb_mean = mean(bb)
+bb_sd = sd(bb)
+
+BB_volatility = (bb-bb_mean)/bb_sd
+
+# RSI and price 20-day mean delta
+rsi_delta = as.vector(rsi[,1]*0)  #create empty vector
+price_delta = as.vector(sma_short*0) # create empty price vector
+price_rsi_div = as.vector(sma_short*0) # crete empty vector to fill with 1 and 0 if RSi and Price delta disagree or disagree
+
+for(i in 2:length(rsi_delta)){
+  
+  # final - initial
+  rsi_delta[i-1] = rsi[i,2] - rsi[i-1,2]
+  price_delta[i-1] = sma_short[i] - sma_short[i-1]
+
+  # check if price and rsi delta agree or *
+  if(rsi_delta[i-1] > 0 & price_delta[i-1] > 0 | rsi_delta[i-1] < 0 & price_delta[i-1] < 0){
+    
+    price_rsi_div[i-1] = 0
+    
+  } else {
+    
+    price_rsi_div[i-1] = 1
+  }
+}
+
+
+# Scale vectors so they can be merged
+rsi_delta = scale(rsi_delta)
+price_delta = scale(price_delta)
+
+
+# calculate the weighted moving average
+wma_divergence = WMA(price_rsi_div, n = 15, wts = 1:15)
+wma_divergence[is.na(wma_divergence)] = 0 # replace NAs with 0
+
+rsi_div_signal = .35 # if divergence score is greater than .2 then categorize it as a divergence
+rsi_div_trade = which(wma_divergence > rsi_div_signal)
+
+
+
+##Overbought/Oversold warnings
+n = nrow(df)
+rsi_buy = 0
+rsi_sell = 0
+bb_buy = 0
+bb_sell = 0
+
+
+# strategy:
+# trade off the SAR indicator after a RSI trend reversal signal (30 & 75)
+
+rsi_upper = 75
+rsi_lower = 30
+rsi_trigger = 0 
+sar_buy = 0
+sar_sell = 0
+
+
+rsi_div_trigger = 0
+rsi_div_buy = 0
+rsi_div_sell = 0
+bb_div_buy = 0
+bb_div_sell = 0
+
+
+for(i in 2:new_length){
+  
+  
+  # set RSI trigger
+  
+  if(rsi[i,1] > rsi_upper){
+    
+    rsi_trigger = -1 # set signal to -1 to signal the SAR short @ next signal
+
+  } else if (rsi[i,1] < rsi_lower){
+    
+    rsi_trigger = 1
+  }
+  
+  
+  # produce SAR trade signals
+  
+  if(df[i-1,4] < sar[i-1] & df[i,4] > sar[i] & rsi_trigger == 1){
+    
+    sar_buy = c(sar_buy,i)
+    rsi_trigger = 0 # set the trigger back to 0
+  
+  
+  } else if (df[i-1,4] > sar[i-1] & df[i,4] < sar[i] & rsi_trigger == -1){
+    
+    sar_sell = c(sar_sell,i)
+    rsi_trigger = 0 # set the trigger back to 0
+  }
+  
+  
+  # Create BB and RSI Band trades during RSI divergence periods
+  
+  if(i %in% rsi_div_trade & df[i-1,4] < bbands[i-1,1] & df[i,4] > bbands[i,1]){
+    
+    # bb div buy
+    bb_div_buy = c(bb_div_buy, i)
+    
+  } else if (i %in% rsi_div_trade & df[i-1,4] > bbands[i-1,3] & df[i,4] < bbands[i,3]){
+    
+    # bb div sell
+    bb_div_sell = c(bb_div_sell, i)
+    
+    
+  } else if (i %in% rsi_div_trade & rsi[i-1,1] < rsi[i-1,4] & rsi[i,1] > rsi[i,4]){
+    
+    # rsi div buy
+    rsi_div_buy = c(rsi_div_buy, i)
+    
+  } else if (i %in% rsi_div_trade & rsi[i-1,1] > rsi[i-1,3] & rsi[i,1] < rsi[i,3]){
+    
+    # rsi div sell
+    rsi_div_sell = c(rsi_div_sell, i)
+    
+  
+  }
+  
+  
+}
+
+# remove the first zero
+sar_buy = sar_buy[2:length(sar_buy)]
+sar_sell = sar_sell[2:length(sar_sell)]
+
+
+# add indicator to test output
+if(j == 16){
+  rsi_div_buy = c(rsi_div_buy, nrow(df))
+}
+
+## Determine if trigger a trade
+
+print(etf_name)
+
+#generate graphs
+
+
+# color key
+rsi_div_buy_col = 'green'
+rsi_div_sell_col = 'orangered'
+bb_div_buy_col = 'green'
+bb_div_sell_col = 'orangered'
+bbands_col = 'deepskyblue'
+sar_col = 'blue'
+sar_buy_col = 'green'
+sar_sell_col = 'red'
+div_range_col = 'grey'
+
+# Closing price with all signals
+plot(x = 1:n,
+     y = df[,4],
+     type = 'l',
+     main = paste(etf_name, "Close Price & SAR & Divergence RSI & BB", sep = ": "))
+lines(x = 1:n, y = sar, col = sar_col , lty = 3)
+lines(x = 1:n, y = bbands[,1], lty = 3, col= bbands_col)
+lines(x = 1:n, y = bbands[,3], lty = 3, col = bbands_col)
+lines(x = 1:n, y = bbands[,2], lty = 3, col = bbands_col)
+abline(v = sar_buy, col = sar_buy_col, lty = 1)
+abline(v = sar_sell, col = sar_sell_col, lty = 1)
+abline(v = rsi_div_trade, lty = 3, col = div_range_col)
+abline(v = rsi_div_buy, lty = 2, col = rsi_div_buy_col)
+abline(v = rsi_div_sell, lty = 2, col = rsi_div_sell_col)
+abline(v = bb_div_buy, lty = 2, col = bb_div_buy_col)
+abline(v = bb_div_sell, lty = 2, col = bb_div_sell_col)
+
+legend('topleft', 
+       legend = c('SAR',
+                  'BBands',
+                  'SAR Buy',
+                  'SAR Sell',
+                  'Divergence Buy',
+                  'Divergence Sell',
+                  'Divergene Rage'
+                  ),
+       col = c(sar_col,
+               bbands_col,
+               sar_buy_col,
+               sar_sell_col,
+               bb_div_buy_col,
+               bb_div_sell_col,
+               div_range_col),
+       lty = c(3,3,1,1,2,2,3),
+       cex = .5)
+
+
+
+# RSI w/ Bands
+#Plot RSI
+plot(x = 1:n,
+     y = rsi[,1],
+     type = 'l',
+     main = paste(etf_name, "RSI", sep = ": "))
+lines(x = 1:n, y = rsi[,2], lty = 2)
+lines(x = 1:n, y = rsi[,3], lty = 2, col = 3)
+lines(x = 1:n, y = rsi[,4], lty = 2, col = 2)
+
+
+
+
+
+# RSI & Price Difference Score
+plot(x = 1:n,
+     y = wma_divergence,
+     type = 'l',
+     main = paste(etf_name, "RSI & Price Divergence Score", sep = ": "))
+abline(v = rsi_div_trade, lty = 2, col = 'grey')
+
+
+
+  
+  
+
+
+
+
+
+
+```
